@@ -1,22 +1,44 @@
 {
   "manifest_version": 2,
   "name": "Tab Sorter",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Save every tab in a window to an HTML file grouped by domain, close them, and merge saved files later.",
   "browser_specific_settings": {
     "gecko": {
       "id": "tab-sorter@miatoromatic",
       "strict_min_version": "115.0",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       }
     }
   },
-  "permissions": ["tabs", "downloads", "storage"],
+  "permissions": [
+    "tabs",
+    "downloads",
+    "storage",
+    "<all_urls>"
+  ],
   "background": {
-    "scripts": ["options.js", "lib.js", "background.js"],
+    "scripts": [
+      "options.js",
+      "lib.js",
+      "background.js"
+    ],
     "persistent": true
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "file:///*"
+      ],
+      "js": [
+        "saved-file.js"
+      ],
+      "run_at": "document_end"
+    }
+  ],
   "browser_action": {
     "default_title": "Tab Sorter",
     "default_popup": "popup.html",

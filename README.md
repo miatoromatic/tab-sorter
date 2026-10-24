@@ -14,8 +14,18 @@ into one, so you can fold multiple windows together later.
     page. Blank tabs (new tab, `about:blank`) are closed but not saved.
   - If the file can't be written, or you cancel the Save As dialog, no tabs
     are closed.
-- **Saved page**: a standalone HTML file with a filter box and collapsible
-  domain sections. It works offline and needs nothing installed to open it.
+- **Saved page**: a standalone HTML file with a filter box, collapsible domain
+  sections and each site's icon. It works offline and needs nothing installed
+  to open it.
+  - **Website icons** are captured when you save and embedded in the file, so
+    opening it later doesn't contact any site. Sites without an icon get a
+    colored letter badge.
+  - **Removing links**: hover a link or a group header and click **×**. Use
+    **Undo** (or Ctrl+Z) to restore, then **Save changes**. With the add-on
+    loaded and the file still in `Downloads/tab-sorter/` where Tab Sorter
+    saved it, the file is updated in place. Otherwise (add-on not loaded, file
+    moved, or saved through the Save As dialog) an edited copy is downloaded
+    instead, since a web page can't write to its own file.
 - **Merge**: "Merge saved files…" in the popup opens a page where you pick or
   drop several saved files. Their links are combined by domain, duplicates are
   removed, and a new `tabs-merged-<date>_<time>.html` is saved. The originals
@@ -28,7 +38,8 @@ into one, so you can fold multiple windows together later.
 | --- | --- | --- |
 | Leave pinned tabs open | on | Pinned tabs are neither saved nor closed. |
 | Keep the window open | on | If every tab in the window would close, a new tab is opened first so the window (or Firefox itself, if it's your only window) stays open. |
-| Ask where to save each file | off | Shows a Save As dialog instead of saving to `Downloads/tab-sorter/`. |
+| Include website icons | on | Embeds each site's icon in the saved file. Adds up to a few seconds to saving while icons load. |
+| Ask where to save each file | off | Shows a Save As dialog instead of saving to `Downloads/tab-sorter/`. Files saved this way can't be updated in place after removing links. |
 
 ## Installing
 
@@ -59,13 +70,17 @@ unsigned zip from `about:addons` → gear menu → **Install Add-on From File…
 
 | File | Purpose |
 | --- | --- |
-| `extension/manifest.json` | Add-on manifest (permissions: `tabs`, `downloads`, `storage`) |
+| `extension/manifest.json` | Add-on manifest. Permissions: `tabs`, `downloads`, `storage`, plus access to all sites to fetch icons and to talk to saved files opened from disk |
 | `extension/background.js` | Saves the window and closes the tabs |
 | `extension/lib.js` | Grouping, HTML rendering and reading saved files, shared with the merge page |
 | `extension/options.js` | Option defaults and loading |
 | `extension/popup.html`, `popup.js` | Toolbar popup |
 | `extension/merge.html`, `merge.js` | Merge page |
+| `extension/saved-page.css`, `saved-page.js` | Style and script inlined into every saved file |
+| `extension/saved-file.js` | Content script that lets an opened saved file ask the add-on to overwrite it |
 
 Each saved file also embeds its links as JSON in a
 `<script type="application/json" id="tab-sorter-data">` block. The merge page
-reads that data rather than scraping the visible links.
+reads that data rather than scraping the visible links. Files saved by version
+1.0 don't have icons or remove buttons; run one through the merge page on its
+own to upgrade it.

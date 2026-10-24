@@ -3,8 +3,11 @@
 // Shared by the background script (saving a window) and the merge page.
 const TabSorter = (() => {
   const FORMAT = "tab-sorter";
-  const VERSION = 1;
+  const VERSION = 2;
   const DATA_ELEMENT_ID = "tab-sorter-data";
+  const ICON_SIZE = 32;
+  const ICON_TIMEOUT_MS = 4000;
+  const SAVED_FILES_KEY = "savedFiles";
 
   // Tabs with nothing worth revisiting. They are still closed, just not saved.
   const BLANK_URLS = new Set([
@@ -13,6 +16,10 @@ const TabSorter = (() => {
     "about:home",
     "about:privatebrowsing",
   ]);
+
+  // Icons are only ever embedded as base64 PNGs; anything else is dropped so a
+  // merged file can't inject CSS through the icon rules.
+  const ICON_PATTERN = /^data:image\/png;base64,[A-Za-z0-9+/]+=*$/;
 
   // Reader view wraps the real page: about:reader?url=https%3A%2F%2F...
   function unwrapReaderUrl(url) {
@@ -35,10 +42,54 @@ const TabSorter = (() => {
     }
   }
 
-  function entryFromTab(tab, savedAt) {
+  function validIcon(icon) {
+    return typeof icon === "string" && ICON_PATTERN.test(icon) ? icon : null;
+  }
+
+  function entryFromTab(tab, savedAt, icons = new Map()) {
     const url = unwrapReaderUrl(tab.url || "");
     if (!isWorthSaving(url)) return null;
-    return { url, title: tab.title || url, savedAt };
+    return { url, title: tab.title || url, savedAt, icon: icons.get(tab.favIconUrl) || null };
+  }
+
+  // Fetches a favicon and shrinks it to a small PNG data URL so the saved file
+  // shows icons offline without contacting the sites again.
+  async function iconToDataUrl(src) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ICON_TIMEOUT_MS);
+    try {
+      const response = await fetch(src, { signal: controller.signal, cache: "force-cache" });
+      if (!response.ok) return null;
+      const objectUrl = URL.createObjectURL(await response.blob());
+      try {
+        const image = new Image();
+        image.src = objectUrl;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = ICON_SIZE;
+        canvas.getContext("2d").drawImage(image, 0, 0, ICON_SIZE, ICON_SIZE);
+        return validIcon(canvas.toDataURL("image/png"));
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    } catch {
+      return null; // unreachable, timed out or not an image: fall back to a letter badge
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Map of favIconUrl -> PNG data URL for every tab icon that could be loaded.
+  async function collectIcons(tabs) {
+    const sources = [...new Set(tabs.map((tab) => tab.favIconUrl).filter(Boolean))];
+    const icons = new Map();
+    await Promise.all(
+      sources.map(async (src) => {
+        const icon = await iconToDataUrl(src);
+        if (icon) icons.set(src, icon);
+      }),
+    );
+    return icons;
   }
 
   // Sort key that keeps subdomains of one site together (docs.google.com next to
@@ -120,39 +171,98 @@ const TabSorter = (() => {
     );
   }
 
-  function renderEntry(entry) {
+  function plural(n, word) {
+    return `${n} ${word}${n === 1 ? "" : "s"}`;
+  }
+
+  // Colored letter shown when a site has no usable icon.
+  function letterBadge(name) {
+    let hash = 0;
+    for (const char of name) hash = (hash * 31 + char.codePointAt(0)) % 360;
+    const letter = (name.match(/[\p{L}\p{N}]/u) || ["?"])[0].toUpperCase();
+    return `<span class="icon letter" style="--hue:${hash}" aria-hidden="true">${escapeHtml(letter)}</span>`;
+  }
+
+  function renderIcon(icon, fallbackName, iconIds) {
+    return icon && iconIds.has(icon)
+      ? `<span class="icon i${iconIds.get(icon)}" aria-hidden="true"></span>`
+      : letterBadge(fallbackName);
+  }
+
+  function renderEntry(entry, index, group, iconIds) {
     const saved = entry.savedAt ? formatDate(entry.savedAt) : "";
     const tooltip = saved ? `${entry.url}\nSaved ${saved}` : entry.url;
     return (
-      `<li><a href="${escapeHtml(entry.url)}" title="${escapeHtml(tooltip)}">` +
-      `${escapeHtml(entry.title)}</a><span class="url">${escapeHtml(entry.url)}</span></li>`
+      `<li data-index="${index}">${renderIcon(entry.icon, group.name, iconIds)}` +
+      `<div class="text"><a href="${escapeHtml(entry.url)}" title="${escapeHtml(tooltip)}">` +
+      `${escapeHtml(entry.title)}</a><span class="url">${escapeHtml(entry.url)}</span></div>` +
+      `<button type="button" class="delete" title="Remove this link" aria-label="Remove this link">×</button></li>`
     );
   }
 
-  function renderGroup(group) {
+  function renderGroup(group, firstIndex, iconIds) {
+    const groupIcon = (group.entries.find((entry) => entry.icon) || {}).icon;
+    const items = group.entries.map((entry, i) => renderEntry(entry, firstIndex + i, group, iconIds));
     return (
       `<details class="group" open data-domain="${escapeHtml(group.name.toLowerCase())}">\n` +
-      `<summary><span class="domain">${escapeHtml(group.name)}</span>` +
-      `<span class="count">${group.entries.length}</span></summary>\n` +
-      `<ul>\n${group.entries.map(renderEntry).join("\n")}\n</ul>\n</details>`
+      `<summary>${renderIcon(groupIcon, group.name, iconIds)}` +
+      `<span class="domain">${escapeHtml(group.name)}</span>` +
+      `<span class="count">${group.entries.length}</span>` +
+      `<button type="button" class="delete" title="Remove this whole group" ` +
+      `aria-label="Remove the ${escapeHtml(group.name)} group">×</button></summary>\n` +
+      `<ul>\n${items.join("\n")}\n</ul>\n</details>`
     );
+  }
+
+  // The saved page's own stylesheet and script, inlined into every file.
+  let pageAssets;
+  function loadPageAssets() {
+    pageAssets ??= Promise.all(
+      ["saved-page.css", "saved-page.js"].map((name) =>
+        fetch(browser.runtime.getURL(name)).then((response) => response.text()),
+      ),
+    ).then(([css, js]) => ({ css, js }));
+    return pageAssets;
   }
 
   // Builds the standalone HTML page. The entries are also embedded as JSON so the
   // merge page can read them back exactly instead of scraping links.
-  function renderDocument(entries, { title, createdAt = new Date().toISOString(), mergedFrom = 0 }) {
+  async function renderDocument(entries, { title, createdAt = new Date().toISOString(), mergedFrom = 0 }) {
+    const { css, js } = await loadPageAssets();
     const groups = groupEntries(entries);
     const unique = groups.flatMap((group) => group.entries);
-    const data = { format: FORMAT, version: VERSION, createdAt, entries: unique };
+
+    // Each distinct icon is stored once, as a CSS class, however many links use it.
+    const icons = [...new Set(unique.map((entry) => entry.icon).filter(validIcon))];
+    const iconIds = new Map(icons.map((icon, i) => [icon, i]));
+    const iconCss = icons.map((icon, i) => `.i${i}{background-image:url("${icon}")}`).join("\n");
+
+    const data = {
+      format: FORMAT,
+      version: VERSION,
+      createdAt,
+      icons,
+      entries: unique.map(({ url, title: entryTitle, savedAt, icon }) => ({
+        url,
+        title: entryTitle,
+        savedAt,
+        icon: iconIds.has(icon) ? iconIds.get(icon) : null,
+      })),
+    };
     // "<" escaped so a title containing </script> can't end the data block.
     const json = JSON.stringify(data).replace(/</g, "\\u003c");
 
-    const stats = [
-      `${unique.length} ${unique.length === 1 ? "tab" : "tabs"}`,
-      `${groups.length} ${groups.length === 1 ? "domain" : "domains"}`,
-      mergedFrom ? `merged from ${mergedFrom} files` : "",
-      `saved ${formatDate(createdAt)}`,
-    ].filter(Boolean);
+    let index = 0;
+    const groupHtml = groups.map((group) => {
+      const html = renderGroup(group, index, iconIds);
+      index += group.entries.length;
+      return html;
+    });
+
+    const extraStats = [mergedFrom ? `merged from ${mergedFrom} files` : "", `saved ${formatDate(createdAt)}`]
+      .filter(Boolean)
+      .map((text) => ` · ${escapeHtml(text)}`)
+      .join("");
 
     return `<!doctype html>
 <html lang="en">
@@ -161,87 +271,32 @@ const TabSorter = (() => {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <style>
-  :root {
-    --bg: #f7f7f9; --card: #fff; --text: #1d1d21; --muted: #6b6b76;
-    --border: #e2e2e8; --accent: #3b6fd8; --chip: #eef1f8;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #17171b; --card: #222228; --text: #ececf1; --muted: #9a9aa6;
-      --border: #34343c; --accent: #7fa4f0; --chip: #2c2f3a;
-    }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
-  }
-  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 64px; }
-  h1 { font-size: 1.5rem; margin: 0 0 4px; }
-  .stats { color: var(--muted); margin: 0 0 16px; }
-  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
-  .toolbar input {
-    flex: 1 1 240px; padding: 8px 10px; font: inherit; color: inherit;
-    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
-  }
-  .toolbar button {
-    padding: 8px 12px; font: inherit; color: inherit; cursor: pointer;
-    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
-  }
-  .group {
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 8px; margin-bottom: 10px;
-  }
-  summary {
-    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
-    cursor: pointer; font-weight: 600; list-style-position: inside;
-  }
-  .count {
-    font-size: 0.8rem; font-weight: 500; color: var(--muted);
-    background: var(--chip); border-radius: 999px; padding: 1px 8px;
-  }
-  ul { list-style: none; margin: 0; padding: 0 14px 10px; }
-  li { padding: 6px 0; border-top: 1px solid var(--border); min-width: 0; }
-  li a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
-  li a:hover { text-decoration: underline; }
-  li a:visited { color: var(--muted); }
-  .url {
-    display: block; font-size: 0.8rem; color: var(--muted);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  [hidden] { display: none !important; }
+${css}
+</style>
+<style id="icons">
+${iconCss}
 </style>
 </head>
 <body>
 <main>
 <h1>${escapeHtml(title)}</h1>
-<p class="stats">${escapeHtml(stats.join(" · "))}</p>
+<p class="stats"><span id="stat-tabs">${plural(unique.length, "tab")}</span> · <span id="stat-domains">${plural(groups.length, "domain")}</span>${extraStats}</p>
+<p id="notice" role="status" hidden></p>
 <div class="toolbar">
   <input id="filter" type="search" placeholder="Filter by title, URL or domain…" autocomplete="off">
   <button type="button" id="expand">Expand all</button>
   <button type="button" id="collapse">Collapse all</button>
 </div>
-${groups.map(renderGroup).join("\n")}
+${groupHtml.join("\n")}
 </main>
+<div id="savebar" hidden>
+  <span id="savebar-text"></span>
+  <button type="button" id="undo">Undo</button>
+  <button type="button" id="save" class="primary">Save changes</button>
+</div>
 <script type="application/json" id="${DATA_ELEMENT_ID}">${json}</script>
 <script>
-  const groups = document.querySelectorAll(".group");
-  document.getElementById("filter").addEventListener("input", (event) => {
-    const query = event.target.value.trim().toLowerCase();
-    for (const group of groups) {
-      const domainHit = group.dataset.domain.includes(query);
-      let visible = 0;
-      for (const item of group.querySelectorAll("li")) {
-        const hit = !query || domainHit || item.textContent.toLowerCase().includes(query);
-        item.hidden = !hit;
-        if (hit) visible++;
-      }
-      group.hidden = visible === 0;
-      if (query && visible) group.open = true;
-    }
-  });
-  document.getElementById("expand").onclick = () => groups.forEach((g) => (g.open = true));
-  document.getElementById("collapse").onclick = () => groups.forEach((g) => (g.open = false));
+${js}
 </script>
 </body>
 </html>
@@ -257,12 +312,14 @@ ${groups.map(renderGroup).join("\n")}
       try {
         const data = JSON.parse(dataElement.textContent);
         if (data && data.format === FORMAT && Array.isArray(data.entries)) {
+          const icons = Array.isArray(data.icons) ? data.icons : [];
           return data.entries
             .filter((e) => e && typeof e.url === "string" && isSafeUrl(e.url))
             .map((e) => ({
               url: e.url,
               title: typeof e.title === "string" && e.title ? e.title : e.url,
               savedAt: typeof e.savedAt === "string" ? e.savedAt : data.createdAt || null,
+              icon: Number.isInteger(e.icon) ? validIcon(icons[e.icon]) : null,
             }));
         }
       } catch {
@@ -274,24 +331,46 @@ ${groups.map(renderGroup).join("\n")}
         url: a.getAttribute("href").trim(),
         title: a.textContent.trim(),
         savedAt: null,
+        icon: validIcon(a.getAttribute("icon")), // bookmarks exports carry icons this way
       }))
       .filter((e) => isSafeUrl(e.url))
       .map((e) => ({ ...e, title: e.title || e.url }));
   }
 
-  // Saves through the downloads API and resolves once the file is fully written.
+  // Paths as Firefox reports them (C:\Users\...) and as file: URLs give them
+  // (/C:/Users/...) in one comparable form.
+  function normalizePath(path) {
+    const slashed = path.replace(/\\/g, "/");
+    const windows = slashed.match(/^\/?([A-Za-z]:\/.*)$/);
+    return windows ? windows[1].toLowerCase() : slashed;
+  }
+
+  // Files the add-on wrote into Downloads/tab-sorter/ are remembered so that a
+  // saved page can later ask to be overwritten with an edited version.
+  async function rememberSavedFile(absolutePath) {
+    const name = absolutePath.split(/[\\/]/).pop();
+    const { [SAVED_FILES_KEY]: files = {} } = await browser.storage.local.get(SAVED_FILES_KEY);
+    files[normalizePath(absolutePath)] = `tab-sorter/${name}`;
+    await browser.storage.local.set({ [SAVED_FILES_KEY]: files });
+  }
+
+  async function savedFileFor(absolutePath) {
+    const { [SAVED_FILES_KEY]: files = {} } = await browser.storage.local.get(SAVED_FILES_KEY);
+    return files[normalizePath(absolutePath)] || null;
+  }
+
+  // Saves through the downloads API and resolves with the finished download item.
   // Rejects if the user cancels the Save As dialog or the download fails.
-  async function downloadHtml(html, filename, saveAs) {
+  async function downloadHtml(html, filename, { saveAs = false, conflictAction = "uniquify" } = {}) {
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     try {
-      const id = await browser.downloads.download({
-        url,
-        filename,
-        saveAs,
-        conflictAction: "uniquify",
-      });
+      const id = await browser.downloads.download({ url, filename, saveAs, conflictAction });
       await waitForDownload(id);
+      const [item] = await browser.downloads.search({ id });
+      // Only files saved without a dialog are known to be in Downloads/tab-sorter/.
+      if (!saveAs && item) await rememberSavedFile(item.filename);
+      return item;
     } finally {
       URL.revokeObjectURL(url);
     }
@@ -319,10 +398,13 @@ ${groups.map(renderGroup).join("\n")}
 
   return {
     entryFromTab,
+    collectIcons,
     groupEntries,
     renderDocument,
     extractEntries,
     downloadHtml,
+    normalizePath,
+    savedFileFor,
     timestamp,
   };
 })();

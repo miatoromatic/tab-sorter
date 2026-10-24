@@ -103,11 +103,11 @@ mergeButton.addEventListener("click", async () => {
   try {
     const options = await loadOptions();
     const stamp = TabSorter.timestamp();
-    const html = TabSorter.renderDocument(allEntries(), {
+    const html = await TabSorter.renderDocument(allEntries(), {
       title: `Tabs merged ${stamp}`,
       mergedFrom: loaded.length,
     });
-    await TabSorter.downloadHtml(html, `tab-sorter/tabs-merged-${stamp}.html`, options.saveAs);
+    await TabSorter.downloadHtml(html, `tab-sorter/tabs-merged-${stamp}.html`, { saveAs: options.saveAs });
     showStatus("Merged file saved. You can delete the originals if you no longer need them.");
   } catch (error) {
     showStatus(error.message, true);
