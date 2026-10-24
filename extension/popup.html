@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="ui.css">
+<style>
+  body { width: 300px; padding: 14px; }
+  h1 { font-size: 1rem; margin: 0 0 4px; }
+  #count { margin: 0 0 12px; }
+  #save { width: 100%; margin-bottom: 12px; }
+  fieldset { border: 1px solid var(--border); border-radius: 6px; margin: 0 0 12px; padding: 6px 10px; }
+  #status:empty { display: none; }
+  #status { margin: 0 0 12px; }
+  #merge { width: 100%; }
+</style>
+</head>
+<body>
+<h1>Tab Sorter</h1>
+<p id="count" class="muted">Counting tabs…</p>
+<button id="save" class="primary" disabled>Save &amp; close tabs</button>
+<p id="status" role="status"></p>
+<fieldset>
+  <label class="option"><input type="checkbox" id="skipPinned"> Leave pinned tabs open</label>
+  <label class="option"><input type="checkbox" id="keepWindowOpen"> Keep the window open</label>
+  <label class="option"><input type="checkbox" id="saveAs"> Ask where to save each file</label>
+</fieldset>
+<button id="merge">Merge saved files…</button>
+<script src="options.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>
